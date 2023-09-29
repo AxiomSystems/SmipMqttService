@@ -1,69 +1,102 @@
 ﻿using System;
 using System.Runtime.InteropServices;
-using MQTTnet;
-using MQTTnet.Client;
 using System.Threading.Tasks;
 using System.Threading;
-using MQTTnet.Protocol;
 using System.Text;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.IO;
-using System.Reflection.PortableExecutable;
+using MQTTnet;
+using MQTTnet.Client;
+using Microsoft.Extensions.Configuration;
+using Serilog;
 
 namespace SmipMqttService
 {
     internal class MqttService
     {
         static string dataRoot = "";
+        static string logPath = "";
         static string histRoot = "MqttHist";
+        static int heartbeatSeconds = 5;
+        static string heartbeatTopic = "Smip.Mqtt.Connector.Heartbeat";
         static string topicListFile = "MqttTopicList.txt";
         static string topicSubscriptionFile = "CloudAcquiredTagList.txt";
         static string compoundSeperator = @"/:/";
         static List<string> knownTopics = new List<string>();
+        static MqttFactory mqttFactory = new MqttFactory();
+        static IMqttClient mqttClient = mqttFactory.CreateMqttClient();
         static async Task Main(string[] args)
         {
-            
+
+            // Figure out environment
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 dataRoot = @"C:\ProgramData\ThinkIQ\DataRoot";
-                Console.WriteLine("Starting MQTT Helper Service on Windows!\r\nUsing root: " + dataRoot);
-            } else
+                logPath = @"C:\ProgramData\ThinkIQ\DataRoot\Logs\SmipMqttLog.txt";
+                Console.WriteLine("Starting MQTT Helper Service on Windows!");
+            }
+            else
             {
-                dataRoot = "/opt/thinkiq/DataRoot";
-                Console.WriteLine("Starting MQTT Helper Service on *nix!\r\nUsing root: " + dataRoot);
+                dataRoot = @"/opt/thinkiq/DataRoot";
+                logPath = @"/opt/thinkiq/services/SmipMqttService";
+                Console.WriteLine("Starting MQTT Helper Service on *nix!");
             }
 
             // Setup files and folders we need
             histRoot = Path.Combine(dataRoot, histRoot);
             Directory.CreateDirectory(histRoot);
+            Environment.SetEnvironmentVariable("LOGFILEPATH", logPath);
 
-            //TODO: This should come from a config file
-            string broker = "192.168.10.5";
-            int port = 1883;
-            string clientId = Guid.NewGuid().ToString();
-            string topic = "#";
-            string username = "";
-            string password = "";
+            // Load config
+            IConfiguration configuration = new ConfigurationBuilder()
+               .AddJsonFile("appsettings.json", true, true)
+               .AddEnvironmentVariables()
+               .Build();
+            var smipConfig = configuration.GetSection("Smip");
+            int.TryParse(smipConfig.GetSection("heartbeatSeconds").Value, out heartbeatSeconds);
 
-            var factory = new MqttFactory();
-            var mqttClient = factory.CreateMqttClient();
+            // Setup Logger (using config)
+            Log.Logger = new LoggerConfiguration()
+                .ReadFrom.Configuration(configuration)
+                .CreateLogger();
 
+            // Seed Topic file (if necessary)
+            if (!CheckTopicCache(heartbeatTopic))
+            {
+                knownTopics.Add(heartbeatTopic);
+                UpdateTopicCache();
+            }
+
+            Log.Information("SMIP MQTT Service Started with Data Root: " + dataRoot);
+            Log.Information("Logging to: " + logPath);
+
+            // Setup Mqtt Connection (using config)
+            var mqttConfig = configuration.GetSection("Mqtt");
+            string broker = mqttConfig.GetSection("brokerHost").Value;
+            int port;
+            if (!int.TryParse(mqttConfig.GetSection("brokerPort").Value, out port))
+            {
+                port = 1883;
+            }
+            string clientId = "smipgw-" + Guid.NewGuid().ToString();
             var options = new MqttClientOptionsBuilder()
                 .WithTcpServer(broker, port) // MQTT broker address and port
-                .WithCredentials(username, password) // Set username and password
+                .WithCredentials(mqttConfig.GetSection("brokerUser").Value, mqttConfig.GetSection("brokerPass").Value) // Set username and password from appsettings
                 .WithClientId(clientId)
                 .WithCleanSession()
                 .Build();
             var connectResult = await mqttClient.ConnectAsync(options);
 
+            // Connect and listen to broker
             if (connectResult.ResultCode == MqttClientConnectResultCode.Success)
             {
-                Console.WriteLine("Connected to MQTT broker successfully.");
-                await mqttClient.SubscribeAsync(topic);
+                Log.Information("Connected to MQTT broker: " + broker);
+                await mqttClient.SubscribeAsync("#");
                 mqttClient.ApplicationMessageReceivedAsync += e =>
                 {
-                    Console.WriteLine("Incoming message: " + Newtonsoft.Json.JsonConvert.SerializeObject(e));
+                    Log.Information("Incoming message for topic: " + e.ApplicationMessage.Topic);
+                    Log.Debug("Payload: " + Newtonsoft.Json.JsonConvert.SerializeObject(e));
                     if (CheckIfTopicSubscribed(e.ApplicationMessage.Topic))
                     {
                         CacheMessageValue(e.ApplicationMessage.Topic, Encoding.UTF8.GetString(e.ApplicationMessage.PayloadSegment));
@@ -74,22 +107,38 @@ namespace SmipMqttService
                 };
 
                 while (true) {
-                    await Task.Delay(1000);
+                    Log.Debug("Sending heartbeat to broker.");
+                    await SendHeartbeat(heartbeatTopic, DateTime.Now.Ticks);
+                    await Task.Delay(heartbeatSeconds * 1000);
                 }
-
-                // Unsubscribe and disconnect
-                await mqttClient.UnsubscribeAsync(topic);
-                await mqttClient.DisconnectAsync();
             }
             else
             {
-                Console.WriteLine($"Failed to connect to MQTT broker: {connectResult.ResultCode}");
+                Log.Fatal($"Failed to connect to MQTT broker: {connectResult.ResultCode}");
+                Environment.Exit(1);
             }
+        }
+
+        static void CurrentDomain_ProcessExit(object sender, EventArgs e)
+        {
+            // Unsubscribe and disconnect
+            _ = mqttClient.UnsubscribeAsync("#");
+            _ = mqttClient.DisconnectAsync();
+            Log.Information("SMIP MQTT Service shutting down cleanly");
+        }
+
+        static async Task SendHeartbeat(string topic, long value)
+        {
+            var applicationMessage = new MqttApplicationMessageBuilder()
+               .WithTopic(topic)
+               .WithPayload(value.ToString())
+               .Build();
+
+            await mqttClient.PublishAsync(applicationMessage, CancellationToken.None);
         }
 
         private static bool CheckIfTopicSubscribed(string incomingTopic)
         {
-            // Since the Connector might lock this file, we have to StreamReader it
             using (var fs = new FileStream(Path.Combine(dataRoot, topicSubscriptionFile), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             using (var sr = new StreamReader(fs, Encoding.Default))
             {
@@ -111,6 +160,7 @@ namespace SmipMqttService
 
         private static void CacheMessageValue(string incomingTopic, string incomingMessage)
         {
+            Log.Debug("Caching value of " + incomingMessage + " for topic " +  incomingTopic);
             var cachePath = Path.Combine(histRoot, (Base64Encode(incomingTopic) + ".txt"));
             File.WriteAllText(cachePath, incomingMessage);
         }
@@ -119,6 +169,7 @@ namespace SmipMqttService
         {
             if (!knownTopics.Contains(incomingTopic))
             {
+                Log.Debug("Learning new simple topic: " + incomingTopic);
                 knownTopics.Add(incomingTopic);
             }
             if (incomingMessage != String.Empty)
@@ -132,6 +183,7 @@ namespace SmipMqttService
                     };
                     using (JsonDocument document = JsonDocument.Parse(incomingMessage, options))
                     {
+                        Log.Debug("Learning new complex topic: " + incomingTopic);
                         LearnTopicsFromPayload(incomingTopic, incomingMessage, compoundSeperator);
                     }
                 }
@@ -169,7 +221,7 @@ namespace SmipMqttService
                     }
                     catch (Exception ex)
                     {
-                        //Maybe it wasn't valid JSON after all
+                        Log.Warning("Topic payload was not parseable as JSON and will be ignored: " + ex.Message);
                     }
                 }
             }
@@ -177,8 +229,7 @@ namespace SmipMqttService
 
         private static void UpdateTopicCache()
         {
-            Console.WriteLine("Topic list now: " + JsonSerializer.Serialize(knownTopics));
-            //StreamReaders seem safer when multiple things might be accessing the file
+            Log.Information("Topic list now: " + JsonSerializer.Serialize(knownTopics));
             using (var sw = new StreamWriter(Path.Combine(dataRoot, topicListFile), false))
             {
                 foreach (var topic in knownTopics)
@@ -187,10 +238,26 @@ namespace SmipMqttService
                 }
             }
         }
+
+        private static bool CheckTopicCache(string topicToCheck)
+        {
+            using (var sr = new StreamReader(Path.Combine(dataRoot, topicListFile), false))
+            {
+                while (!sr.EndOfStream)
+                {
+                    if (sr.ReadLine() == topicToCheck)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
         private static bool IsValidJson(string json)
         {
-            //TODO: This returns true for simple strings for some reason
             if (json == null || json == String.Empty)
+                return false;
+            if (!json.Contains(":") && !json.Contains("{") && !json.Contains("["))
                 return false;
             try
             {
@@ -205,14 +272,8 @@ namespace SmipMqttService
 
         private static string Base64Encode(string plainText)
         {
-            var plainTextBytes = System.Text.Encoding.UTF8.GetBytes(plainText);
-            return System.Convert.ToBase64String(plainTextBytes);
-        }
-
-        private static string Base64Decode(string base64EncodedData)
-        {
-            var base64EncodedBytes = System.Convert.FromBase64String(base64EncodedData);
-            return System.Text.Encoding.UTF8.GetString(base64EncodedBytes);
+            var plainTextBytes = Encoding.UTF8.GetBytes(plainText);
+            return Convert.ToBase64String(plainTextBytes);
         }
     }
 }

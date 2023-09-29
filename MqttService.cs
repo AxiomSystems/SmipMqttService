@@ -10,6 +10,8 @@ using MQTTnet;
 using MQTTnet.Client;
 using Microsoft.Extensions.Configuration;
 using Serilog;
+using Newtonsoft.Json.Linq;
+using System.Data;
 
 namespace SmipMqttService
 {
@@ -17,9 +19,12 @@ namespace SmipMqttService
     {
         static string dataRoot = "";
         static string logPath = "";
+        static string iotIdPath = "";
+        static string iotId;
         static string histRoot = "MqttHist";
         static int heartbeatSeconds = 5;
         static string heartbeatTopic = "Smip.Mqtt.Connector.Heartbeat";
+        static string iotIdTopic = "Smip.Mqtt.Connector.IotId";
         static string topicListFile = "MqttTopicList.txt";
         static string topicSubscriptionFile = "CloudAcquiredTagList.txt";
         static string compoundSeperator = @"/:/";
@@ -34,12 +39,14 @@ namespace SmipMqttService
             {
                 dataRoot = @"C:\ProgramData\ThinkIQ\DataRoot";
                 logPath = @"C:\ProgramData\ThinkIQ\DataRoot\Logs\SmipMqttLog.txt";
+                iotIdPath = @"C:\ProgramData\iot-registry\.iotid";
                 Console.WriteLine("Starting MQTT Helper Service on Windows!");
             }
             else
             {
                 dataRoot = @"/opt/thinkiq/DataRoot";
                 logPath = @"/opt/thinkiq/services/SmipMqttService/Logs/SmipMqttLog.txt";
+                iotIdPath = @"/opt/iot-registry/.iotid";
                 Console.WriteLine("Starting MQTT Helper Service on *nix!");
             }
 
@@ -61,7 +68,15 @@ namespace SmipMqttService
                 .ReadFrom.Configuration(configuration)
                 .CreateLogger();
 
+            // Load identity (if present)
+            iotId = CheckForIotId(iotIdPath);
+
             // Seed Topic file (if necessary)
+            if (iotId != String.Empty && !CheckTopicCache(iotIdTopic))
+            {
+                knownTopics.Add(iotIdTopic);
+                UpdateTopicCache();
+            }
             if (!CheckTopicCache(heartbeatTopic))
             {
                 knownTopics.Add(heartbeatTopic);
@@ -127,6 +142,30 @@ namespace SmipMqttService
             Log.Information("SMIP MQTT Service shutting down cleanly");
         }
 
+        static string CheckForIotId(string iotIdPath)
+        {
+            if (File.Exists(iotIdPath))
+            {
+                try
+                {
+                    iotId = File.ReadAllText(iotIdPath);
+                    Log.Information("Using IOT ID: " + iotId);
+                    return iotId;
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning("Found .iotid file, but could not read for publication.");
+                    Log.Debug(ex.Message);
+                    return String.Empty;
+                }
+            }
+            else
+            {
+                Log.Debug("No .iotid found at " + iotIdPath);
+                return String.Empty;
+            }
+        }
+
         static async Task SendHeartbeat(string topic, long value)
         {
             var applicationMessage = new MqttApplicationMessageBuilder()
@@ -135,6 +174,17 @@ namespace SmipMqttService
                .Build();
 
             await mqttClient.PublishAsync(applicationMessage, CancellationToken.None);
+            
+            //Also publish identity, if present
+            if (iotId != String.Empty)
+            {
+                applicationMessage = new MqttApplicationMessageBuilder()
+                       .WithTopic(iotIdTopic)
+                       .WithPayload(iotId)
+                       .Build();
+
+                await mqttClient.PublishAsync(applicationMessage, CancellationToken.None);
+            }
         }
 
         private static bool CheckIfTopicSubscribed(string incomingTopic)

@@ -39,7 +39,7 @@ namespace SmipMqttService
             else
             {
                 dataRoot = @"/opt/thinkiq/DataRoot";
-                logPath = @"/opt/thinkiq/services/SmipMqttService";
+                logPath = @"/opt/thinkiq/services/SmipMqttService/Logs/SmipMqttLog.txt";
                 Console.WriteLine("Starting MQTT Helper Service on *nix!");
             }
 

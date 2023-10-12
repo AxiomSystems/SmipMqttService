@@ -10,16 +10,13 @@ using MQTTnet;
 using MQTTnet.Client;
 using Microsoft.Extensions.Configuration;
 using Serilog;
-using Newtonsoft.Json.Linq;
-using System.Data;
+using System.Linq;
 
 namespace SmipMqttService
 {
     internal class MqttService
     {
-        static string dataRoot = "";
-        static string logPath = "";
-        static string iotIdPath = "";
+        static string dataRoot, logPath, iotIdPath = "";
         static string iotId;
         static string histRoot = "MqttHist";
         static int heartbeatSeconds = 5;
@@ -27,7 +24,7 @@ namespace SmipMqttService
         static string iotIdTopic = "Smip.Mqtt.Connector.IotId";
         static string topicListFile = "MqttTopicList.txt";
         static string topicSubscriptionFile = "CloudAcquiredTagList.txt";
-        static string compoundSeperator = @"/:/";
+        static string topicSeperator, virtualTopicSeperator;
         static List<string> knownTopics = new List<string>();
         static MqttFactory mqttFactory = new MqttFactory();
         static IMqttClient mqttClient = mqttFactory.CreateMqttClient();
@@ -53,6 +50,14 @@ namespace SmipMqttService
             // Setup files and folders we need
             histRoot = Path.Combine(dataRoot, histRoot);
             Directory.CreateDirectory(histRoot);
+            topicListFile = Path.Combine (dataRoot, topicListFile);
+            if (!File.Exists(topicListFile))
+                File.Create(topicListFile).Dispose();
+            else
+                knownTopics = LoadKnownTopics();
+            topicSubscriptionFile = Path.Combine(dataRoot, topicSubscriptionFile);
+            if (!File.Exists(topicSubscriptionFile))
+                File.Create(topicSubscriptionFile).Dispose();
             Environment.SetEnvironmentVariable("LOGFILEPATH", logPath);
 
             // Load config
@@ -71,21 +76,6 @@ namespace SmipMqttService
             // Load identity (if present)
             iotId = CheckForIotId(iotIdPath);
 
-            // Seed Topic file (if necessary)
-            if (iotId != String.Empty && !CheckTopicCache(iotIdTopic))
-            {
-                knownTopics.Add(iotIdTopic);
-                UpdateTopicCache();
-            }
-            if (!CheckTopicCache(heartbeatTopic))
-            {
-                knownTopics.Add(heartbeatTopic);
-                UpdateTopicCache();
-            }
-
-            Log.Information("SMIP MQTT Service Started with Data Root: " + dataRoot);
-            Log.Information("Logging to: " + logPath);
-
             // Setup Mqtt Connection (using config)
             var mqttConfig = configuration.GetSection("Mqtt");
             string broker = mqttConfig.GetSection("brokerHost").Value;
@@ -94,6 +84,27 @@ namespace SmipMqttService
             {
                 port = 1883;
             }
+
+            Log.Information("SMIP MQTT Service Started with Data Root: " + dataRoot);
+            Log.Information("Using MQTT Broker at: " + broker + ":" + port);
+            Log.Information("Logging to: " + logPath);
+
+            // Seed Topic file (if necessary)
+            if (iotId != String.Empty && !CheckTopicCache(iotIdTopic))
+                knownTopics.Add(iotIdTopic);
+            if (!CheckTopicCache(heartbeatTopic))
+                knownTopics.Add(heartbeatTopic);
+            UpdateTopicCache();
+
+            //Setup topic parsing
+            topicSeperator = mqttConfig.GetSection("topicSeperator").Value;
+            if (topicSeperator == null)
+                topicSeperator = String.Empty;
+            virtualTopicSeperator = mqttConfig.GetSection("virtualTopicSeperator").Value;
+            if (virtualTopicSeperator == null)
+                virtualTopicSeperator = String.Empty;
+
+            //Creat MQTT connection
             string clientId = "smipgw-" + Guid.NewGuid().ToString();
             var options = new MqttClientOptionsBuilder()
                 .WithTcpServer(broker, port) // MQTT broker address and port
@@ -102,16 +113,17 @@ namespace SmipMqttService
                 .WithCleanSession()
                 .Build();
             var connectResult = await mqttClient.ConnectAsync(options);
-
-            // Connect and listen to broker
             if (connectResult.ResultCode == MqttClientConnectResultCode.Success)
             {
                 Log.Information("Connected to MQTT broker: " + broker);
                 await mqttClient.SubscribeAsync("#");
-                mqttClient.ApplicationMessageReceivedAsync += e =>
-                {
-                    Log.Information("Incoming message for topic: " + e.ApplicationMessage.Topic);
-                    Log.Debug("Payload: " + Newtonsoft.Json.JsonConvert.SerializeObject(e));
+                mqttClient.ApplicationMessageReceivedAsync += e => {
+                    if (e.ApplicationMessage.Topic == heartbeatTopic || e.ApplicationMessage.Topic == iotIdTopic)   //Don't show own messages unless in debug
+                        Log.Debug("Incoming message for topic: " + e.ApplicationMessage.Topic);
+                    else
+                        Log.Information("Incoming message for topic: " + e.ApplicationMessage.Topic);
+                    if (e.ApplicationMessage.Payload != null)
+                        Log.Debug("Payload: " + Newtonsoft.Json.JsonConvert.SerializeObject(e));
                     if (CheckIfTopicSubscribed(e.ApplicationMessage.Topic))
                     {
                         CacheMessageValue(e.ApplicationMessage.Topic, Encoding.UTF8.GetString(e.ApplicationMessage.PayloadSegment));
@@ -195,9 +207,9 @@ namespace SmipMqttService
                 while (!sr.EndOfStream)
                 {
                     var unCompoundTopic = sr.ReadLine();
-                    if (unCompoundTopic.IndexOf(compoundSeperator) > -1)
+                    if (unCompoundTopic.IndexOf(virtualTopicSeperator) > -1)
                     {
-                        unCompoundTopic = unCompoundTopic.Substring(0, unCompoundTopic.IndexOf(compoundSeperator));
+                        unCompoundTopic = unCompoundTopic.Substring(0, unCompoundTopic.IndexOf(virtualTopicSeperator));
                     }
                     if (incomingTopic == unCompoundTopic)
                     {
@@ -215,27 +227,60 @@ namespace SmipMqttService
             File.WriteAllText(cachePath, incomingMessage);
         }
 
-        private static void LearnTopicsFromTopic(string incomingTopic, string incomingMessage, string seperator = "/")
+        private static void LearnTopicsFromTopic(string incomingTopic, string incomingMessage)
         {
-            if (!knownTopics.Contains(incomingTopic))
+            if (!incomingTopic.Contains(virtualTopicSeperator) || virtualTopicSeperator == String.Empty) //Learn parts of topic name (unless virtual topic)
             {
-                Log.Debug("Learning new simple topic: " + incomingTopic);
-                knownTopics.Add(incomingTopic);
-            }
-            if (incomingMessage != String.Empty)
-            {
-                if (IsValidJson(incomingMessage))
+                if (topicSeperator != String.Empty)
                 {
-                    var options = new JsonDocumentOptions
+                    var topicParts = incomingTopic.Split(topicSeperator);
+                    var previousPart = String.Empty;
+                    foreach (var topicPart in topicParts)
                     {
-                        AllowTrailingCommas = true,
-                        CommentHandling = JsonCommentHandling.Skip
-                    };
-                    using (JsonDocument document = JsonDocument.Parse(incomingMessage, options))
-                    {
-                        Log.Debug("Learning new complex topic: " + incomingTopic);
-                        LearnTopicsFromPayload(incomingTopic, incomingMessage, compoundSeperator);
+                        if ((topicSeperator + topicPart + topicSeperator) != virtualTopicSeperator)
+                        {
+                            if (previousPart != String.Empty)
+                                previousPart = previousPart + topicSeperator + topicPart;
+                            else
+                                previousPart = topicPart;
+                            if (!knownTopics.Contains(previousPart))
+                            {
+                                Log.Information("Learning new topic part: " + previousPart);
+                                knownTopics.Add(previousPart);
+                            }
+                        }
                     }
+                }
+                else
+                {
+                    if (!knownTopics.Contains(incomingTopic))
+                    {
+                        Log.Information("Learning new topic: " + incomingTopic);
+                        knownTopics.Add(incomingTopic);
+                    }
+                }
+                
+            }
+            else //Learn virtual topic
+            {
+                if (!knownTopics.Contains(incomingTopic) && virtualTopicSeperator != String.Empty)
+                {
+                    Log.Information("Learning new virtual topic: " + incomingTopic);
+                    knownTopics.Add(incomingTopic);
+                }
+            }
+            //Discover virtual topics from body
+            if (IsValidJson(incomingMessage) && virtualTopicSeperator != String.Empty)
+            {
+                var options = new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = true,
+                    CommentHandling = JsonCommentHandling.Skip
+                };
+                using (JsonDocument document = JsonDocument.Parse(incomingMessage, options))
+                {
+                    Log.Information("Examing payload for new virtual topics: " + incomingTopic);
+                    LearnTopicsFromPayload(incomingTopic, incomingMessage, virtualTopicSeperator);
                 }
             }
         }
@@ -279,19 +324,26 @@ namespace SmipMqttService
 
         private static void UpdateTopicCache()
         {
-            Log.Information("Topic list now: " + JsonSerializer.Serialize(knownTopics));
-            using (var sw = new StreamWriter(Path.Combine(dataRoot, topicListFile), false))
+            var previousTopics = LoadKnownTopics();
+            if (!knownTopics.SequenceEqual(previousTopics))
             {
-                foreach (var topic in knownTopics)
+                Log.Information("Topic list now: " + JsonSerializer.Serialize(knownTopics));
+                using (var sw = new StreamWriter(topicListFile, false))
                 {
-                    sw.WriteLine(topic);
+                    foreach (var topic in knownTopics)
+                    {
+                        sw.WriteLine(topic);
+                    }
                 }
             }
         }
 
+        //TODO: This method is ridiciulously ineffecient.
+        //  The only reasons to read and write from files is to make them easier to examine for debugging,
+        //  and provide some persistence between runs.
         private static bool CheckTopicCache(string topicToCheck)
         {
-            using (var sr = new StreamReader(Path.Combine(dataRoot, topicListFile), false))
+            using (var sr = new StreamReader(topicListFile, false))
             {
                 while (!sr.EndOfStream)
                 {
@@ -303,6 +355,20 @@ namespace SmipMqttService
                 return false;
             }
         }
+
+        private static List<string> LoadKnownTopics()
+        {
+            List<string> previousTopics = new List<string>();
+            using (var sr = new StreamReader(topicListFile, false))
+            {
+                while (!sr.EndOfStream)
+                {
+                    previousTopics.Add(sr.ReadLine());
+                }
+            }
+            return previousTopics;
+        }
+
         private static bool IsValidJson(string json)
         {
             if (json == null || json == String.Empty)

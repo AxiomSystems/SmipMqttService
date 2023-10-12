@@ -29,8 +29,9 @@ The default virtual topic seperator is `/:/`, and is used in combination with th
 
 ```
 {
-child: {
-	name: "Jonathan"
+  "child": {
+    "name": "Jonathan"
+  }
 }
 ```
 

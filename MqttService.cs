@@ -107,7 +107,7 @@ namespace SmipMqttService
             //Creat MQTT connection
             string clientId = "smipgw-" + Guid.NewGuid().ToString();
             var options = new MqttClientOptionsBuilder()
-                .WithTcpServer(broker, port) // MQTT broker address and port
+                .WithTcpServer(broker, port)
                 .WithCredentials(mqttConfig.GetSection("brokerUser").Value, mqttConfig.GetSection("brokerPass").Value) // Set username and password from appsettings
                 .WithClientId(clientId)
                 .WithCleanSession()
@@ -322,6 +322,10 @@ namespace SmipMqttService
             }
         }
 
+        #region Topic Cache Management
+        //TODO: This group of methods are ridiciulously ineffecient.
+        //  The only reasons to read and write from files is to make them easier to examine for debugging,
+        //  and provide some persistence between runs.
         private static void UpdateTopicCache()
         {
             var previousTopics = LoadKnownTopics();
@@ -337,10 +341,6 @@ namespace SmipMqttService
                 }
             }
         }
-
-        //TODO: This method is ridiciulously ineffecient.
-        //  The only reasons to read and write from files is to make them easier to examine for debugging,
-        //  and provide some persistence between runs.
         private static bool CheckTopicCache(string topicToCheck)
         {
             using (var sr = new StreamReader(topicListFile, false))
@@ -368,7 +368,8 @@ namespace SmipMqttService
             }
             return previousTopics;
         }
-
+        #endregion
+        
         private static bool IsValidJson(string json)
         {
             if (json == null || json == String.Empty)

@@ -105,13 +105,14 @@ namespace SmipMqttService
                 virtualTopicSeperator = String.Empty;
 
             //Creat MQTT connection
+            bool tlsValue = false;
+            string tlsSetting = mqttConfig.GetSection("brokerTLS").Value;
+            if (tlsSetting != null)
+            {
+                Boolean.TryParse(tlsSetting, out tlsValue);
+            }
             string clientId = "smipgw-" + Guid.NewGuid().ToString();
-            var options = new MqttClientOptionsBuilder()
-                .WithTcpServer(broker, port)
-                .WithCredentials(mqttConfig.GetSection("brokerUser").Value, mqttConfig.GetSection("brokerPass").Value) // Set username and password from appsettings
-                .WithClientId(clientId)
-                .WithCleanSession()
-                .Build();
+            var options = BuildMqttClientOptions(broker, port, tlsValue, clientId, mqttConfig.GetSection("brokerUser").Value, mqttConfig.GetSection("brokerPass").Value);
             var connectResult = await mqttClient.ConnectAsync(options);
             if (connectResult.ResultCode == MqttClientConnectResultCode.Success)
             {
@@ -144,6 +145,20 @@ namespace SmipMqttService
                 Log.Fatal($"Failed to connect to MQTT broker: {connectResult.ResultCode}");
                 Environment.Exit(1);
             }
+        }
+
+        static MqttClientOptions BuildMqttClientOptions(string Server, int Port, bool UseTls, string ClientID, string Username, string Password)
+        {
+            MqttClientOptionsBuilder builder = new MqttClientOptionsBuilder()
+                .WithTcpServer(Server, Port);
+            if (UseTls)
+                builder.WithTls();
+            if (!string.IsNullOrEmpty(ClientID))
+                builder.WithClientId(ClientID);
+            if (!string.IsNullOrEmpty(Username))
+                builder.WithCredentials(Username, Password);
+            builder.WithCleanSession();
+            return builder.Build();
         }
 
         static void CurrentDomain_ProcessExit(object sender, EventArgs e)

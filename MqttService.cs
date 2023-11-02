@@ -11,6 +11,8 @@ using MQTTnet.Client;
 using Microsoft.Extensions.Configuration;
 using Serilog;
 using System.Linq;
+using System.Security.Cryptography.X509Certificates;
+using System.Security.Authentication;
 
 namespace SmipMqttService
 {
@@ -111,8 +113,14 @@ namespace SmipMqttService
             {
                 Boolean.TryParse(tlsSetting, out tlsValue);
             }
+            bool untrustedCertValue = false;
+            string untrustedCertSetting = mqttConfig.GetSection("allowUntrustedCerts").Value;
+            if (untrustedCertSetting != null)
+            {
+                Boolean.TryParse(untrustedCertSetting, out untrustedCertValue);
+            }
             string clientId = "smipgw-" + Guid.NewGuid().ToString();
-            var options = BuildMqttClientOptions(broker, port, tlsValue, clientId, mqttConfig.GetSection("brokerUser").Value, mqttConfig.GetSection("brokerPass").Value);
+            var options = BuildMqttClientOptions(broker, port, tlsValue, untrustedCertValue, clientId, mqttConfig.GetSection("brokerUser").Value, mqttConfig.GetSection("brokerPass").Value);
             var connectResult = await mqttClient.ConnectAsync(options);
             if (connectResult.ResultCode == MqttClientConnectResultCode.Success)
             {
@@ -147,12 +155,22 @@ namespace SmipMqttService
             }
         }
 
-        static MqttClientOptions BuildMqttClientOptions(string Server, int Port, bool UseTls, string ClientID, string Username, string Password)
+        static MqttClientOptions BuildMqttClientOptions(string Server, int Port, bool UseTls, bool allowUntrustedCerts, string ClientID, string Username, string Password)
         {
             MqttClientOptionsBuilder builder = new MqttClientOptionsBuilder()
                 .WithTcpServer(Server, Port);
             if (UseTls)
-                builder.WithTls();
+            {
+                builder.WithTls(
+                   o =>
+                   {
+                       o.UseTls = true;
+                       o.AllowUntrustedCertificates = allowUntrustedCerts;
+                       o.SslProtocol = SslProtocols.None;
+                       o.CertificateValidationHandler = (context) => true;  //TODO: Add certificate validation
+                   }
+               );
+            }
             if (!string.IsNullOrEmpty(ClientID))
                 builder.WithClientId(ClientID);
             if (!string.IsNullOrEmpty(Username))

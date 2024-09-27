@@ -3,6 +3,8 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
+    <TargetOS>Ubuntu</TargetOS>
+    <AssemblyName>ThinkIQ.Mqtt.Service</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

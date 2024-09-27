@@ -43,8 +43,10 @@ namespace SmipMqttService
             }
             else
             {
-                dataRoot = @"/opt/thinkiq/DataRoot";
-                logPath = @"/opt/thinkiq/services/SmipMqttService/Logs/SmipMqttLog.txt";
+                // dataRoot = @"/opt/thinkiq/DataRoot";
+                dataRoot = @"/opt/thinkiq-mqtt/DataRoot";
+                // logPath = @"/opt/thinkiq/services/SmipMqttService/Logs/SmipMqttLog.txt";
+                logPath = @"/opt/thinkiq-mqtt/services/Mqtt/Logs/SmipMqttLog.txt";
                 iotIdPath = @"/opt/iot-registry/.iotid";
                 Console.WriteLine("Starting MQTT Helper Service on *nix!");
             }
@@ -193,7 +195,7 @@ namespace SmipMqttService
             {
                 try
                 {
-                    iotId = File.ReadAllText(iotIdPath);
+                    iotId = File_ReadAllText(iotIdPath);
                     Log.Information("Using IOT ID: " + iotId);
                     return iotId;
                 }
@@ -209,6 +211,43 @@ namespace SmipMqttService
                 Log.Debug("No .iotid found at " + iotIdPath);
                 return String.Empty;
             }
+        }
+
+        /// <summary>
+        /// File_ReadAllText - Replaces File.ReadAllText, which cannot open files that other
+        /// processes are using. 
+        /// </summary>
+        /// <param name="strPath"></param>
+        /// <returns></returns>
+        public static string File_ReadAllText(string strPath)
+        {
+            string strOutput;
+            using (var fs = new FileStream(strPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var sr = new StreamReader(fs, Encoding.Default))
+            {
+                // read the stream
+                //...
+                strOutput = sr.ReadToEnd();
+            }
+
+            return strOutput;
+        }
+
+        /// <summary>
+        /// File_WriteAllText - Replaces File.ReadAllText, which cannot open files that other
+        /// processes are using. 
+        /// </summary>
+        /// <param name="strPath"></param>
+        /// <returns></returns>
+        public static void File_WriteAllText(string strPath, string strData)
+        {
+
+            StreamWriter sw = new StreamWriter(strPath, false);
+            sw.Write(strData);
+            sw.Close();
+            sw.Dispose();
+
+            return;
         }
 
         static async Task SendHeartbeat(string topic, long value)
